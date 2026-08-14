@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<odoo noupdate="1">
+    <record id="mail_template_oauth_signup_notification" model="mail.template">
+        <field name="name">OAuth: account created for a new user</field>
+        <field name="model_id" ref="base.model_res_users" />
+        <field
+            name="subject"
+        >New {{ object.oauth_provider_id.name }} user: {{ object.name }}</field>
+        <field
+            name="email_from"
+        >{{ object.company_id.email_formatted or user.email_formatted }}</field>
+        <field
+            name="description"
+        >Sent to the users watching an OAuth provider when it creates an account.</field>
+        <field name="auto_delete" eval="True" />
+        <field name="body_html" type="html">
+            <div style="margin: 0px; padding: 0px;">
+                <p>
+                    An account was created automatically when
+                    <t t-out="object.name or ''" />
+                    signed in through
+                    <t t-out="object.oauth_provider_id.name or ''" />.
+                </p>
+                <ul>
+                    <li>Name: <t t-out="object.name or ''" /></li>
+                    <li>Login: <t t-out="object.login or ''" /></li>
+                    <li>Email: <t t-out="object.email or ''" /></li>
+                </ul>
+                <p>
+                    New accounts are built from the sign-up template user, so
+                    this one starts with no application access. Review it and
+                    set its groups:
+                </p>
+                <p>
+                    <a
+                        t-att-href="object.get_base_url() + '/odoo/action-base.action_res_users/' + str(object.id)"
+                    >Open <t t-out="object.name or ''" /></a>
+                </p>
+            </div>
+        </field>
+    </record>
+</odoo>
