@@ -1,6 +1,8 @@
 # Copyright 2026 Ledo Enterprises
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl)
 
+import json
+
 from odoo.exceptions import AccessDenied
 from odoo.tests import TransactionCase
 
@@ -20,6 +22,13 @@ class TestAuthOauthLinkExistingUser(TransactionCase):
         cls.user = cls._create_user("target@example.com", "Target User")
         cls.env["ir.config_parameter"].sudo().set_param(
             "auth_oauth_link_existing_user.allowed_domains", "example.com"
+        )
+        # Pin signup to invited-only. The inherited _auth_oauth_signin falls
+        # through to signup before this module gets a chance, and on a database
+        # configured for uninvited signup that would CREATE a user rather than
+        # decline — which is a different code path from the one under test.
+        cls.env["ir.config_parameter"].sudo().set_param(
+            "auth_signup.invitation_scope", "b2b"
         )
 
     @classmethod
@@ -111,22 +120,24 @@ class TestAuthOauthLinkExistingUser(TransactionCase):
 
     # -- integration with the inherited flow ------------------------------ #
 
+    def _signin(self, validation):
+        # `state` is not optional. The inherited implementation does
+        # `json.loads(params["state"])` in its AccessDenied branch, so omitting
+        # it raises KeyError before this module is ever consulted — the tests
+        # would pass for the wrong reason, or fail confusingly.
+        return self.ResUsers._auth_oauth_signin(
+            self.provider.id,
+            validation,
+            {"access_token": "token", "state": json.dumps({})},
+        )
+
     def test_signin_raises_when_link_is_refused(self):
         """A refusal must leave behaviour identical to not installing this."""
         with self.assertRaises(AccessDenied):
-            self.ResUsers._auth_oauth_signin(
-                self.provider.id,
-                self._validation("nobody@example.com"),
-                {"access_token": "token"},
-            )
+            self._signin(self._validation("nobody@example.com"))
 
     def test_signin_returns_login_when_link_succeeds(self):
-        login = self.ResUsers._auth_oauth_signin(
-            self.provider.id,
-            self._validation("target@example.com"),
-            {"access_token": "token"},
-        )
-        self.assertEqual(login, self.user.login)
+        self.assertEqual(self._signin(self._validation("target@example.com")), self.user.login)
 
     # -- configuration ---------------------------------------------------- #
 
