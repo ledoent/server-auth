@@ -5,6 +5,7 @@ import json
 
 from odoo.exceptions import AccessDenied
 from odoo.tests import TransactionCase
+from odoo.tools import mute_logger
 
 
 class TestAuthOauthLinkExistingUser(TransactionCase):
@@ -20,14 +21,14 @@ class TestAuthOauthLinkExistingUser(TransactionCase):
         cls.provider = cls.env.ref("auth_oauth.provider_google")
         cls.ResUsers = cls.env["res.users"]
         cls.user = cls._create_user("target@example.com", "Target User")
-        cls.env["ir.config_parameter"].sudo().set_param(
+        cls.env["ir.config_parameter"].sudo().set_str(
             "auth_oauth_link_existing_user.allowed_domains", "example.com"
         )
         # Pin signup to invited-only. The inherited _auth_oauth_signin falls
         # through to signup before this module gets a chance, and on a database
         # configured for uninvited signup that would CREATE a user rather than
         # decline — which is a different code path from the one under test.
-        cls.env["ir.config_parameter"].sudo().set_param(
+        cls.env["ir.config_parameter"].sudo().set_str(
             "auth_signup.invitation_scope", "b2b"
         )
 
@@ -66,7 +67,7 @@ class TestAuthOauthLinkExistingUser(TransactionCase):
         )
 
     def test_empty_domain_list_allows_any_verified_domain(self):
-        self.env["ir.config_parameter"].sudo().set_param(
+        self.env["ir.config_parameter"].sudo().set_str(
             "auth_oauth_link_existing_user.allowed_domains", ""
         )
         other = self._create_user("someone@other.test", "Other")
@@ -96,8 +97,17 @@ class TestAuthOauthLinkExistingUser(TransactionCase):
         )
         self.assertFalse(outsider.oauth_uid)
 
+    @mute_logger("odoo.addons.auth_oauth_link_existing_user.models.res_users")
     def test_refuses_rebinding_a_different_identity(self):
-        """Rebinding would be an account-takeover primitive."""
+        """Rebinding would be an account-takeover primitive.
+
+        Muted because this is the one refusal the model logs at WARNING rather
+        than INFO -- deliberately, since a rebinding attempt is the one that
+        might be an attack -- and OCA CI runs with OCA_ENABLE_CHECKLOG_ODOO=1,
+        which fails the build on a single WARNING. Muting the test keeps the
+        production log level honest; downgrading the model to INFO to satisfy
+        CI would be the wrong way round.
+        """
         self.user.write(
             {"oauth_uid": "existing-uid", "oauth_provider_id": self.provider.id}
         )
@@ -137,12 +147,14 @@ class TestAuthOauthLinkExistingUser(TransactionCase):
             self._signin(self._validation("nobody@example.com"))
 
     def test_signin_returns_login_when_link_succeeds(self):
-        self.assertEqual(self._signin(self._validation("target@example.com")), self.user.login)
+        self.assertEqual(
+            self._signin(self._validation("target@example.com")), self.user.login
+        )
 
     # -- configuration ---------------------------------------------------- #
 
     def test_allowed_domains_parsing(self):
-        self.env["ir.config_parameter"].sudo().set_param(
+        self.env["ir.config_parameter"].sudo().set_str(
             "auth_oauth_link_existing_user.allowed_domains",
             " Example.COM , other.test ,, ",
         )

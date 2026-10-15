@@ -28,10 +28,16 @@ class ResUsers(models.Model):
     @api.model
     def _oauth_link_allowed_domains(self):
         """Domains whose addresses may be linked. Empty set means no restriction."""
+        # get_str, not get_param: 20.0 removed the untyped get_param/set_param
+        # pair in favour of get_bool/get_int/get_float/get_str. Left as
+        # get_param this raises AttributeError on every login that reaches the
+        # link path -- the module's only code path -- and no upgrade_code
+        # script rewrites it. The .sudo() stays: get_str still checks read
+        # access.
         param = (
             self.env["ir.config_parameter"]
             .sudo()
-            .get_param("auth_oauth_link_existing_user.allowed_domains", "")
+            .get_str("auth_oauth_link_existing_user.allowed_domains", "")
         )
         return {d.strip().lower() for d in (param or "").split(",") if d.strip()}
 
