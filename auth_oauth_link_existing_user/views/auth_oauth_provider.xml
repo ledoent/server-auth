@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+    <!-- Next to validation_endpoint deliberately: the setting is about what that
+       endpoint does and does not return, so it reads in the place where
+       somebody is already looking at the provider's claims. -->
+    <record id="view_oauth_provider_form" model="ir.ui.view">
+        <field name="name">auth.oauth.provider.form.link.existing.user</field>
+        <field name="model">auth.oauth.provider</field>
+        <field name="inherit_id" ref="auth_oauth.view_oauth_provider_form" />
+        <field name="arch" type="xml">
+            <field name="validation_endpoint" position="after">
+                <field name="link_assume_email_verified" />
+            </field>
+        </field>
+    </record>
+</odoo>

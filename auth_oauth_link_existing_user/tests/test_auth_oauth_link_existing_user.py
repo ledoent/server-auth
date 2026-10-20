@@ -151,6 +151,75 @@ class TestAuthOauthLinkExistingUser(TransactionCase):
             self._signin(self._validation("target@example.com")), self.user.login
         )
 
+    # -- providers that verify but do not say so --------------------------- #
+
+    def _entra_like(self, email="target@example.com", uid="oauth-uid-1"):
+        """What Microsoft Entra ID actually returns: no email_verified key."""
+        return {"user_id": uid, "email": email}
+
+    def test_refuses_absent_claim_when_provider_not_trusted(self):
+        """The default must not change. Off means off."""
+        self.assertFalse(self.provider.link_assume_email_verified)
+        self.assertIsNone(self._link(self._entra_like()))
+        self.assertFalse(self.user.oauth_uid)
+
+    def test_links_absent_claim_when_provider_is_trusted(self):
+        self.provider.link_assume_email_verified = True
+        self.assertEqual(self._link(self._entra_like()), self.user.login)
+        self.assertEqual(self.user.oauth_uid, "oauth-uid-1")
+
+    def test_trusted_provider_does_not_bypass_the_domain_list(self):
+        """Trusting the claim must not widen anything else.
+
+        This is the control that keeps the flag narrow: it says "believe this
+        provider's address", not "let this provider in".
+        """
+        self.provider.link_assume_email_verified = True
+        outsider = self._create_user("someone@other.test", "Outsider")
+        self.assertIsNone(
+            self._link(self._entra_like("someone@other.test", uid="uid-outsider"))
+        )
+        self.assertFalse(outsider.oauth_uid)
+
+    @mute_logger("odoo.addons.auth_oauth_link_existing_user.models.res_users")
+    def test_trusted_provider_still_refuses_rebinding(self):
+        self.provider.link_assume_email_verified = True
+        self.user.write(
+            {"oauth_uid": "existing-uid", "oauth_provider_id": self.provider.id}
+        )
+        self.assertIsNone(self._link(self._entra_like(uid="attacker-uid")))
+        self.assertEqual(self.user.oauth_uid, "existing-uid")
+
+    def test_trusted_provider_still_refuses_archived_user(self):
+        self.provider.link_assume_email_verified = True
+        self.user.write({"active": False})
+        self.assertIsNone(self._link(self._entra_like()))
+        self.assertFalse(self.user.oauth_uid)
+
+    def test_explicit_false_claim_is_refused_even_when_trusted(self):
+        """Configuration fills silence; it does not overrule a denial.
+
+        A provider that sends email_verified=False is making a statement, and
+        the flag only exists for providers that make none.
+        """
+        self.provider.link_assume_email_verified = True
+        self.assertIsNone(
+            self._link(self._validation("target@example.com", verified=False))
+        )
+        self.assertFalse(self.user.oauth_uid)
+
+    def test_trust_is_per_provider(self):
+        """Turning it on for one provider must not turn it on for another."""
+        other = self.env.ref("auth_oauth.provider_openerp")
+        self.provider.link_assume_email_verified = True
+        self.assertFalse(other.link_assume_email_verified)
+        self.assertIsNone(
+            self.ResUsers._oauth_link_existing_user(
+                other.id, self._entra_like(), {"access_token": "token"}
+            )
+        )
+        self.assertFalse(self.user.oauth_uid)
+
     # -- configuration ---------------------------------------------------- #
 
     def test_allowed_domains_parsing(self):
