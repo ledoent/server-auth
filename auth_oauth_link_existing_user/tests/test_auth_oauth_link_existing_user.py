@@ -1,0 +1,242 @@
+# Copyright 2026 Ledo Enterprises
+# License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl)
+
+import json
+
+from odoo.exceptions import AccessDenied
+from odoo.tests import TransactionCase
+from odoo.tools import mute_logger
+
+
+class TestAuthOauthLinkExistingUser(TransactionCase):
+    """Most of these are refusals.
+
+    The module widens who can sign in, so the tests that carry weight are the
+    ones proving it does not widen it too far.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.provider = cls.env.ref("auth_oauth.provider_google")
+        cls.ResUsers = cls.env["res.users"]
+        cls.user = cls._create_user("target@example.com", "Target User")
+        cls.env["ir.config_parameter"].sudo().set_str(
+            "auth_oauth_link_existing_user.allowed_domains", "example.com"
+        )
+        # Pin signup to invited-only. The inherited _auth_oauth_signin falls
+        # through to signup before this module gets a chance, and on a database
+        # configured for uninvited signup that would CREATE a user rather than
+        # decline — which is a different code path from the one under test.
+        cls.env["ir.config_parameter"].sudo().set_str(
+            "auth_signup.invitation_scope", "b2b"
+        )
+
+    @classmethod
+    def _create_user(cls, login, name):
+        return cls.env["res.users"].create(
+            {"name": name, "login": login, "email": login}
+        )
+
+    def _validation(self, email, verified=True, uid="oauth-uid-1"):
+        return {"user_id": uid, "email": email, "email_verified": verified}
+
+    def _link(self, validation):
+        return self.ResUsers._oauth_link_existing_user(
+            self.provider.id, validation, {"access_token": "token"}
+        )
+
+    # -- linking ---------------------------------------------------------- #
+
+    def test_links_verified_allowed_address(self):
+        login = self._link(self._validation("target@example.com"))
+        self.assertEqual(login, self.user.login)
+        self.assertEqual(self.user.oauth_uid, "oauth-uid-1")
+        self.assertEqual(self.user.oauth_provider_id, self.provider)
+
+    def test_match_is_case_insensitive(self):
+        self.assertEqual(
+            self._link(self._validation("TARGET@Example.COM")), self.user.login
+        )
+
+    def test_same_identity_links_again(self):
+        """A second sign-in must not start failing."""
+        self._link(self._validation("target@example.com"))
+        self.assertEqual(
+            self._link(self._validation("target@example.com")), self.user.login
+        )
+
+    def test_empty_domain_list_allows_any_verified_domain(self):
+        self.env["ir.config_parameter"].sudo().set_str(
+            "auth_oauth_link_existing_user.allowed_domains", ""
+        )
+        other = self._create_user("someone@other.test", "Other")
+        self._link(self._validation("someone@other.test", uid="uid-other"))
+        self.assertEqual(other.oauth_uid, "uid-other")
+
+    # -- refusals --------------------------------------------------------- #
+
+    def test_refuses_unverified_address(self):
+        """The safety argument rests entirely on the provider verifying it."""
+        self.assertIsNone(
+            self._link(self._validation("target@example.com", verified=False))
+        )
+        self.assertFalse(self.user.oauth_uid)
+
+    def test_refuses_when_verified_flag_absent(self):
+        """Silence is not verification."""
+        validation = self._validation("target@example.com")
+        del validation["email_verified"]
+        self.assertIsNone(self._link(validation))
+        self.assertFalse(self.user.oauth_uid)
+
+    def test_refuses_domain_outside_the_list(self):
+        outsider = self._create_user("someone@other.test", "Outsider")
+        self.assertIsNone(
+            self._link(self._validation("someone@other.test", uid="uid-outsider"))
+        )
+        self.assertFalse(outsider.oauth_uid)
+
+    @mute_logger("odoo.addons.auth_oauth_link_existing_user.models.res_users")
+    def test_refuses_rebinding_a_different_identity(self):
+        """Rebinding would be an account-takeover primitive.
+
+        Muted because this is the one refusal the model logs at WARNING rather
+        than INFO -- deliberately, since a rebinding attempt is the one that
+        might be an attack -- and OCA CI runs with OCA_ENABLE_CHECKLOG_ODOO=1,
+        which fails the build on a single WARNING. Muting the test keeps the
+        production log level honest; downgrading the model to INFO to satisfy
+        CI would be the wrong way round.
+        """
+        self.user.write(
+            {"oauth_uid": "existing-uid", "oauth_provider_id": self.provider.id}
+        )
+        self.assertIsNone(
+            self._link(self._validation("target@example.com", uid="attacker-uid"))
+        )
+        self.assertEqual(self.user.oauth_uid, "existing-uid")
+
+    def test_refuses_archived_user(self):
+        self.user.write({"active": False})
+        self.assertIsNone(self._link(self._validation("target@example.com")))
+        self.assertFalse(self.user.oauth_uid)
+
+    def test_refuses_unknown_address(self):
+        self.assertIsNone(self._link(self._validation("nobody@example.com")))
+
+    def test_refuses_malformed_addresses(self):
+        for value in ("", None, "   ", "not-an-email"):
+            self.assertIsNone(self._link(self._validation(value)))
+
+    # -- integration with the inherited flow ------------------------------ #
+
+    def _signin(self, validation):
+        # `state` is not optional. The inherited implementation does
+        # `json.loads(params["state"])` in its AccessDenied branch, so omitting
+        # it raises KeyError before this module is ever consulted — the tests
+        # would pass for the wrong reason, or fail confusingly.
+        return self.ResUsers._auth_oauth_signin(
+            self.provider.id,
+            validation,
+            {"access_token": "token", "state": json.dumps({})},
+        )
+
+    def test_signin_raises_when_link_is_refused(self):
+        """A refusal must leave behaviour identical to not installing this."""
+        with self.assertRaises(AccessDenied):
+            self._signin(self._validation("nobody@example.com"))
+
+    def test_signin_returns_login_when_link_succeeds(self):
+        self.assertEqual(
+            self._signin(self._validation("target@example.com")), self.user.login
+        )
+
+    # -- providers that verify but do not say so --------------------------- #
+
+    def _entra_like(self, email="target@example.com", uid="oauth-uid-1"):
+        """What Microsoft Entra ID actually returns: no email_verified key."""
+        return {"user_id": uid, "email": email}
+
+    def test_refuses_absent_claim_when_provider_not_trusted(self):
+        """The default must not change. Off means off."""
+        self.assertFalse(self.provider.link_assume_email_verified)
+        self.assertIsNone(self._link(self._entra_like()))
+        self.assertFalse(self.user.oauth_uid)
+
+    def test_links_absent_claim_when_provider_is_trusted(self):
+        self.provider.link_assume_email_verified = True
+        self.assertEqual(self._link(self._entra_like()), self.user.login)
+        self.assertEqual(self.user.oauth_uid, "oauth-uid-1")
+
+    def test_trusted_provider_does_not_bypass_the_domain_list(self):
+        """Trusting the claim must not widen anything else.
+
+        This is the control that keeps the flag narrow: it says "believe this
+        provider's address", not "let this provider in".
+        """
+        self.provider.link_assume_email_verified = True
+        outsider = self._create_user("someone@other.test", "Outsider")
+        self.assertIsNone(
+            self._link(self._entra_like("someone@other.test", uid="uid-outsider"))
+        )
+        self.assertFalse(outsider.oauth_uid)
+
+    @mute_logger("odoo.addons.auth_oauth_link_existing_user.models.res_users")
+    def test_trusted_provider_still_refuses_rebinding(self):
+        self.provider.link_assume_email_verified = True
+        self.user.write(
+            {"oauth_uid": "existing-uid", "oauth_provider_id": self.provider.id}
+        )
+        self.assertIsNone(self._link(self._entra_like(uid="attacker-uid")))
+        self.assertEqual(self.user.oauth_uid, "existing-uid")
+
+    def test_trusted_provider_still_refuses_archived_user(self):
+        self.provider.link_assume_email_verified = True
+        self.user.write({"active": False})
+        self.assertIsNone(self._link(self._entra_like()))
+        self.assertFalse(self.user.oauth_uid)
+
+    def test_explicit_false_claim_is_refused_even_when_trusted(self):
+        """Configuration fills silence; it does not overrule a denial.
+
+        A provider that sends email_verified=False is making a statement, and
+        the flag only exists for providers that make none.
+        """
+        self.provider.link_assume_email_verified = True
+        self.assertIsNone(
+            self._link(self._validation("target@example.com", verified=False))
+        )
+        self.assertFalse(self.user.oauth_uid)
+
+    def test_trust_is_per_provider(self):
+        """Turning it on for one provider must not turn it on for another."""
+        other = self.env.ref("auth_oauth.provider_openerp")
+        self.provider.link_assume_email_verified = True
+        self.assertFalse(other.link_assume_email_verified)
+        self.assertIsNone(
+            self.ResUsers._oauth_link_existing_user(
+                other.id, self._entra_like(), {"access_token": "token"}
+            )
+        )
+        self.assertFalse(self.user.oauth_uid)
+
+    # -- configuration ---------------------------------------------------- #
+
+    def test_allowed_domains_parsing(self):
+        self.env["ir.config_parameter"].sudo().set_str(
+            "auth_oauth_link_existing_user.allowed_domains",
+            " Example.COM , other.test ,, ",
+        )
+        self.assertEqual(
+            self.ResUsers._oauth_link_allowed_domains(),
+            {"example.com", "other.test"},
+        )
+
+    def test_setting_round_trips_through_config_settings(self):
+        settings = self.env["res.config.settings"].create(
+            {"auth_oauth_link_allowed_domains": "a.test,b.test"}
+        )
+        settings.execute()
+        self.assertEqual(
+            self.ResUsers._oauth_link_allowed_domains(), {"a.test", "b.test"}
+        )
