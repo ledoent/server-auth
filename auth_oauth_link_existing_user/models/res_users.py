@@ -42,14 +42,48 @@ class ResUsers(models.Model):
         return {d.strip().lower() for d in (param or "").split(",") if d.strip()}
 
     @api.model
-    def _oauth_link_check_email_verified(self, validation):
-        """Whether the provider asserted that it verified the address.
+    def _oauth_link_check_email_verified(self, provider, validation):
+        """Whether the address may be treated as verified.
 
-        Absent is treated as unverified. Providers that verify addresses say so
-        explicitly; inferring verification from silence is how an account takeover
-        gets through.
+        Absence is still unverified by default. Providers that verify addresses
+        usually say so explicitly, and inferring verification from silence is
+        how an account takeover gets through.
+
+        The exception is a provider that verifies addresses but never sends the
+        claim. Microsoft Entra ID is one: its /oidc/userinfo returns sub, name
+        and email, and no email_verified at all. Read strictly, that refuses
+        every Entra sign-in. Read loosely -- absence means fine -- it would also
+        wave through providers that let a user type their own address, which is
+        the takeover case above.
+
+        So it is neither, but a per-provider decision: off unless somebody turned
+        it on for a directory that owns the mailboxes it asserts. Note that the
+        setting fills silence only -- an explicit email_verified=False is still
+        a refusal, however the provider is configured.
         """
-        return bool(validation.get("email_verified"))
+        claim = validation.get("email_verified")
+        if claim:
+            return True
+        if claim is not None:
+            # Present and false. That is a denial, not silence, and the setting
+            # below only exists to fill silence -- a provider that bothers to
+            # say "not verified" is to be believed when it says it.
+            return False
+
+        provider_rec = self.env["auth.oauth.provider"].sudo().browse(provider)
+        if provider_rec.link_assume_email_verified:
+            # Logged rather than silent. This is the one path where an address
+            # is trusted on configuration instead of on evidence, so an audit
+            # needs to be able to find every time it happened.
+            _logger.info(
+                "OAuth link treating %s as verified: provider %r is configured "
+                "as verifying addresses without sending the claim",
+                (validation.get("email") or "").strip().lower(),
+                provider_rec.name,
+            )
+            return True
+
+        return False
 
     @api.model
     def _oauth_link_existing_user(self, provider, validation, params):
@@ -62,7 +96,7 @@ class ResUsers(models.Model):
         if not email or "@" not in email:
             return None
 
-        if not self._oauth_link_check_email_verified(validation):
+        if not self._oauth_link_check_email_verified(provider, validation):
             _logger.info(
                 "OAuth link refused for %s: provider did not report a verified email",
                 email,
